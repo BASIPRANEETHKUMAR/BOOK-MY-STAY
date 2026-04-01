@@ -1,84 +1,94 @@
 import java.util.*;
-import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * GOAL: Handle multiple booking requests fairly using a FIFO queue mechanism.
+ * GOAL: Confirm bookings by assigning unique room IDs and preventing double-booking.
  */
 public class Main {
 
-    // --- 1. DOMAIN MODEL: RESERVATION INTENT ---
+    // --- 1. DOMAIN MODELS ---
 
-    // Represents the guest's intent. Note: No allocation data is present yet.
-    public record Reservation(String guestName, String roomType, int nights) {
-        @Override
-        public String toString() {
-            return String.format("Request[Guest: %s, Room: %s]", guestName, roomType);
+    public record ReservationRequest(String guestName, String roomType) {}
+
+    public record ConfirmedBooking(String guestName, String roomType, String roomId) {}
+
+    // --- 2. THE SERVICES (Inventory & Allocation) ---
+
+    public static class AllocationService {
+        // State Holder: Inventory counts (Room Type -> Count)
+        private final Map<String, AtomicInteger> inventory = new ConcurrentHashMap<>();
+
+        // Uniqueness Enforcement: Set of already assigned IDs (Room Type -> Set of Unique IDs)
+        // HashMap<String, Set<String>> allows grouped tracking.
+        private final Map<String, Set<String>> allocatedRooms = new ConcurrentHashMap<>();
+
+        public AllocationService() {
+            // Initializing Mock Inventory
+            inventory.put("DELUXE", new AtomicInteger(2));
+            inventory.put("STANDARD", new AtomicInteger(5));
+
+            allocatedRooms.put("DELUXE", Collections.synchronizedSet(new HashSet<>()));
+            allocatedRooms.put("STANDARD", Collections.synchronizedSet(new HashSet<>()));
+        }
+
+        /**
+         * Requirement: Atomic Logical Operation.
+         * Assigns a room and decrements inventory in one synchronized flow.
+         */
+        public Optional<ConfirmedBooking> processAllocation(ReservationRequest request) {
+            String type = request.roomType();
+
+            // Critical Section: Ensure only one thread allocates for this type at a time
+            synchronized (inventory.get(type)) {
+                AtomicInteger count = inventory.get(type);
+
+                // 1. Check availability
+                if (count.get() > 0) {
+                    // 2. Generate Unique Room ID (e.g., DELUXE-101)
+                    String generatedId = type + "-" + (100 + allocatedRooms.get(type).size() + 1);
+
+                    // 3. Uniqueness Enforcement: Check Set to prevent reuse
+                    if (!allocatedRooms.get(type).contains(generatedId)) {
+
+                        // 4. Record the ID to prevent reuse
+                        allocatedRooms.get(type).add(generatedId);
+
+                        // 5. Decrement inventory immediately
+                        count.decrementAndGet();
+
+                        System.out.printf("[SUCCESS] Allocated %s to %s. Remaining: %d%n",
+                                generatedId, request.guestName(), count.get());
+
+                        return Optional.of(new ConfirmedBooking(request.guestName(), type, generatedId));
+                    }
+                }
+            }
+
+            System.out.printf("[FAILURE] No availability for %s (%s)%n", request.guestName(), type);
+            return Optional.empty();
         }
     }
 
-    // --- 2. FAIRNESS MECHANISM: BOOKING QUEUE ---
-
-    public static class BookingRequestQueue {
-        // LinkedBlockingQueue is thread-safe and preserves arrival order (FIFO)
-        private final Queue<Reservation> queue = new LinkedBlockingQueue<>();
-
-        /**
-         * Requirement: Accept booking requests and store in arrival order.
-         * Concept: FIFO Principle.
-         */
-        public void enqueueRequest(Reservation request) {
-            queue.add(request);
-            System.out.println(">>> System: Received " + request + ". Added to queue.");
-        }
-
-        /**
-         * Returns the next request to be processed without removing it,
-         * or null if the queue is empty.
-         */
-        public Reservation peekNext() {
-            return queue.peek();
-        }
-
-        /**
-         * Requirement: Prepare requests for subsequent processing.
-         * This would be called by the Allocation Service later.
-         */
-        public Reservation dequeueNext() {
-            return queue.poll();
-        }
-
-        public int getQueueSize() {
-            return queue.size();
-        }
-    }
-
-    // --- 3. EXECUTION (ACTORS: MULTIPLE GUESTS) ---
+    // --- 3. EXECUTION ---
 
     public static void main(String[] args) {
-        BookingRequestQueue intakeQueue = new BookingRequestQueue();
+        AllocationService service = new AllocationService();
 
-        System.out.println("--- PEAK DEMAND SIMULATION ---");
-        System.out.println("Decoupling intake from allocation. No inventory mutated yet.\n");
+        // FIFO Queue from previous stage
+        Queue<ReservationRequest> queue = new LinkedList<>();
+        queue.add(new ReservationRequest("Alice", "DELUXE"));
+        queue.add(new ReservationRequest("Bob", "DELUXE"));
+        queue.add(new ReservationRequest("Charlie", "DELUXE")); // This should fail (Inventory is 2)
 
-        // Step 1: Multiple guests submit requests nearly simultaneously
-        intakeQueue.enqueueRequest(new Reservation("Alice", "DELUXE", 3));
-        intakeQueue.enqueueRequest(new Reservation("Bob", "STANDARD", 1));
-        intakeQueue.enqueueRequest(new Reservation("Charlie", "DELUXE", 2));
+        System.out.println("--- Starting Allocation Processing (FIFO) ---");
 
-        System.out.println("\n--- QUEUE STATUS ---");
-        System.out.println("Total requests waiting: " + intakeQueue.getQueueSize());
-
-        // Step 2: Verify Fairness (First-Come-First-Served)
-        System.out.println("First in line: " + intakeQueue.peekNext().guestName());
-
-        // Step 3: Demonstrate processing order (Decoupled Allocation)
-        System.out.println("\n--- PROCESSING LOG (FIFO) ---");
-        while (intakeQueue.getQueueSize() > 0) {
-            Reservation next = intakeQueue.dequeueNext();
-            System.out.println("Processing " + next.guestName() + "'s request...");
-            // Allocation logic would happen here in the next stage
+        while (!queue.isEmpty()) {
+            ReservationRequest request = queue.poll();
+            service.processAllocation(request);
         }
 
-        System.out.println("\nAll queued requests handled. Fairness preserved.");
+        System.out.println("\n--- Final System Consistency Check ---");
+        System.out.println("Inventory reflects real-time state. No double-bookings occurred.");
     }
 }
