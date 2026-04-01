@@ -1,88 +1,64 @@
 import java.util.*;
 
 /**
- * GOAL: Confirm booking requests safely using Unique Sets and Atomic operations.
+ * GOAL: Sort passenger bogies based on seating capacity using a custom Comparator.
  */
 public class Main {
 
-    // --- 1. DOMAIN MODELS ---
+    // --- 1. CUSTOM OBJECT: THE BOGIE CLASS ---
 
-    public record BookingRequest(String guestName, String roomType) {}
+    public static class Bogie {
+        private final String name;
+        private final int capacity;
 
-    public record Confirmation(String guestName, String roomType, String roomId) {}
-
-    // --- 2. CORE SERVICES ---
-
-    public static class BookingService {
-        // Inventory Service (State Holder)
-        private final Map<String, Integer> inventory = new HashMap<>();
-
-        // Uniqueness Enforcement: Mapping Room Types to Sets of Assigned IDs
-        private final Map<String, Set<String>> allocatedRoomIds = new HashMap<>();
-
-        public BookingService() {
-            // Initializing system state
-            inventory.put("DELUXE", 2);
-            inventory.put("STANDARD", 5);
-
-            allocatedRoomIds.put("DELUXE", new HashSet<>());
-            allocatedRoomIds.put("STANDARD", new HashSet<>());
+        public Bogie(String name, int capacity) {
+            this.name = name;
+            this.capacity = capacity;
         }
 
-        /**
-         * Requirement: Process allocation and update inventory immediately.
-         * This method is synchronized to prevent the "Double Booking" problem.
-         */
-        public synchronized Optional<Confirmation> processAllocation(BookingRequest request) {
-            String type = request.roomType();
-            int currentCount = inventory.getOrDefault(type, 0);
+        public String getName() { return name; }
+        public int getCapacity() { return capacity; }
 
-            // 1. Check availability
-            if (currentCount > 0) {
-                // 2. Generate a unique room ID
-                // In a real system, this might be a physical room number (e.g., 101, 102)
-                String generatedId = type + "-" + (allocatedRoomIds.get(type).size() + 1);
-
-                // 3. Uniqueness Enforcement (Check Set to prevent reuse)
-                if (!allocatedRoomIds.get(type).contains(generatedId)) {
-
-                    // 4. Record the ID and decrement inventory immediately (Atomic operation)
-                    allocatedRoomIds.get(type).add(generatedId);
-                    inventory.put(type, currentCount - 1);
-
-                    System.out.printf("[SUCCESS] Confirmed: %s assigned Room %s. Remaining %s: %d%n",
-                            request.guestName(), generatedId, type, inventory.get(type));
-
-                    return Optional.of(new Confirmation(request.guestName(), type, generatedId));
-                }
-            }
-
-            System.out.printf("[DENIED] Could not book %s for %s. Out of stock.%n", type, request.guestName());
-            return Optional.empty();
+        @Override
+        public String toString() {
+            return String.format("Bogie: %-12s | Capacity: %d", name, capacity);
         }
     }
 
-    // --- 3. EXECUTION FLOW ---
+    // --- 2. EXECUTION FLOW ---
 
     public static void main(String[] args) {
-        BookingService bookingService = new BookingService();
+        // Step 1: Create a List<Bogie> to store passenger bogies
+        List<Bogie> trainBogies = new ArrayList<>();
 
-        // FIFO Queue: Stores requests in arrival order
-        Queue<BookingRequest> requestQueue = new LinkedList<>();
-        requestQueue.add(new BookingRequest("Alice", "DELUXE"));
-        requestQueue.add(new BookingRequest("Bob", "DELUXE"));
-        requestQueue.add(new BookingRequest("Charlie", "DELUXE")); // Should fail (only 2 rooms)
-        requestQueue.add(new BookingRequest("Dan", "STANDARD"));
+        // Step 2: Add bogies with varying capacities
+        trainBogies.add(new Bogie("Sleeper", 72));
+        trainBogies.add(new Bogie("AC Chair", 56));
+        trainBogies.add(new Bogie("First Class", 24));
+        trainBogies.add(new Bogie("General", 90));
 
-        System.out.println("--- Processing Dequeued Requests ---");
+        System.out.println("--- Original Train Order ---");
+        trainBogies.forEach(System.out::println);
 
-        // Requirement: Retrieve booking requests from the queue in FIFO order
-        while (!requestQueue.isEmpty()) {
-            BookingRequest currentRequest = requestQueue.poll();
-            bookingService.processAllocation(currentRequest);
-        }
+        // --- 3. KEY CONCEPT: COMPARATOR & SORTING ---
 
-        System.out.println("\n--- Final Allocation Report ---");
-        System.out.println("No room IDs were reused, and inventory is synchronized.");
+        /**
+         * Requirement: Use Comparator.comparingInt() to define sorting.
+         * Benefit: Separation of Data and Logic. The Bogie class doesn't need
+         * to know how to sort itself; the System defines the rule here.
+         */
+        trainBogies.sort(Comparator.comparingInt(Bogie::getCapacity));
+
+        System.out.println("\n--- Sorted by Capacity (Ascending) ---");
+        // Step 4: Display sorted bogies
+        trainBogies.forEach(System.out::println);
+
+        // Optional: Sorting in Descending order (Highest capacity first)
+        trainBogies.sort(Comparator.comparingInt(Bogie::getCapacity).reversed());
+
+        System.out.println("\n--- Sorted by Capacity (Descending) ---");
+        trainBogies.forEach(System.out::println);
+
+        System.out.println("\nProgram continues... Train planning complete.");
     }
 }
