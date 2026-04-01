@@ -1,84 +1,102 @@
+import java.io.*;
 import java.util.*;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * GOAL: Ensure system correctness under concurrent multi-user booking requests.
+ * GOAL: Ensure system state survives restarts using File-based Persistence.
  */
-public class ConcurrentBookingSystem {
+public class Main {
 
-    // --- 1. DOMAIN MODELS ---
-    public record BookingRequest(String guestName, String roomType) {}
+    // --- 1. PERSISTENT MODELS (Must implement Serializable) ---
 
-    // --- 2. THE CONCURRENT PROCESSOR ---
-    public static class ConcurrentBookingProcessor {
-        // Shared Mutable State: Inventory counts
-        private final Map<String, Integer> inventory = new HashMap<>();
+    // Requirement: Serialize complex data structures for storage.
+    public record ConfirmedBooking(String guest, String roomType, String roomId) implements Serializable {}
 
-        // Shared Mutable State: The Request Queue (Thread-safe implementation)
-        private final BlockingQueue<BookingRequest> requestQueue = new LinkedBlockingQueue<>();
+    public static class SystemState implements Serializable {
+        @Serial
+        private static final long serialVersionUID = 1L; // Ensures version compatibility
 
-        public ConcurrentBookingProcessor() {
-            inventory.put("DELUXE", 2); // Only 2 rooms for many guests!
-        }
+        public Map<String, Integer> inventory = new HashMap<>();
+        public List<ConfirmedBooking> history = new ArrayList<>();
 
-        public void submitRequest(BookingRequest request) {
-            requestQueue.add(request);
-        }
-
-        /**
-         * Requirement: Critical Sections & Synchronized Access.
-         * Processes a single request from the queue safely.
-         */
-        public void processNextRequest() {
-            BookingRequest request = requestQueue.poll();
-            if (request == null) return;
-
-            // Synchronization ensures only one thread enters this block per room type
-            synchronized (inventory) {
-                int count = inventory.getOrDefault(request.roomType(), 0);
-
-                System.out.printf("[Thread %s] Checking for %s... (Current Stock: %d)%n",
-                        Thread.currentThread().getName(), request.guestName(), count);
-
-                if (count > 0) {
-                    // Simulate processing time to increase chance of race conditions if unsynced
-                    try { Thread.sleep(50); } catch (InterruptedException e) { }
-
-                    inventory.put(request.roomType(), count - 1);
-                    System.out.printf(">> [SUCCESS] %s booked a %s. Remaining: %d%n",
-                            request.guestName(), request.roomType(), inventory.get(request.roomType()));
-                } else {
-                    System.out.printf(">> [FAILED] No rooms left for %s.%n", request.guestName());
-                }
-            }
+        public void display() {
+            System.out.println("Current Inventory: " + inventory);
+            System.out.println("Booking History Count: " + history.size());
         }
     }
 
-    // --- 3. THE SIMULATION (ACTORS: MULTIPLE GUESTS) ---
-    public static void main(String[] args) throws InterruptedException {
-        ConcurrentBookingProcessor processor = new ConcurrentBookingProcessor();
+    // --- 2. PERSISTENCE SERVICE (File I/O) ---
 
-        // 5 Guests all trying to book the 2 available Deluxe rooms
-        String[] guests = {"Alice", "Bob", "Charlie", "Dan", "Eve"};
-        for (String name : guests) {
-            processor.submitRequest(new BookingRequest(name, "DELUXE"));
+    public static class PersistenceService {
+        private static final String FILE_NAME = "system_state.dat";
+
+        /**
+         * Requirement: Persist state to a file (Serialization).
+         */
+        public void saveState(SystemState state) {
+            try (ObjectOutputStream oos = new ObjectOutputStream(new FileOutputStream(FILE_NAME))) {
+                oos.writeObject(state);
+                System.out.println("[SAVE] System state successfully persisted to " + FILE_NAME);
+            } catch (IOException e) {
+                System.err.println("[SAVE ERROR] Could not persist state: " + e.getMessage());
+            }
         }
 
-        // Creating an ExecutorService to simulate parallel processing
-        // Requirement: Simulate multiple requests occurring at the same time.
-        ExecutorService executor = Executors.newFixedThreadPool(3);
+        /**
+         * Requirement: Restore data during startup (Deserialization).
+         * Concept: Failure Tolerance - Handle missing files gracefully.
+         */
+        public SystemState loadState() {
+            File file = new File(FILE_NAME);
+            if (!file.exists()) {
+                System.out.println("[LOAD] No persistence file found. Starting with fresh state.");
+                return createInitialState();
+            }
 
-        System.out.println("--- CONCURRENCY TEST START ---");
-
-        for (int i = 0; i < guests.length; i++) {
-            executor.submit(processor::processNextRequest);
+            try (ObjectInputStream ois = new ObjectInputStream(new FileInputStream(file))) {
+                System.out.println("[LOAD] Restoring system state from " + FILE_NAME + "...");
+                return (SystemState) ois.readObject();
+            } catch (IOException | ClassNotFoundException e) {
+                System.err.println("[LOAD ERROR] Persistence file corrupted. Starting fresh.");
+                return createInitialState();
+            }
         }
 
-        executor.shutdown();
-        executor.awaitTermination(5, TimeUnit.SECONDS);
+        private SystemState createInitialState() {
+            SystemState state = new SystemState();
+            state.inventory.put("DELUXE", 5);
+            state.inventory.put("STANDARD", 10);
+            return state;
+        }
+    }
 
-        System.out.println("--- CONCURRENCY TEST END ---");
-        System.out.println("Final System State (Inventory): " + processor.inventory);
+    // --- 3. EXECUTION FLOW (RESTART SIMULATION) ---
+
+    public static void main(String[] args) {
+        PersistenceService persistence = new PersistenceService();
+
+        // --- SESSION 1: Application Runs and Mutates State ---
+        System.out.println("=== SESSION 1: INITIAL RUN ===");
+        SystemState session1State = persistence.loadState();
+
+        // Simulate a booking
+        session1State.history.add(new ConfirmedBooking("Alice", "DELUXE", "D-101"));
+        session1State.inventory.put("DELUXE", session1State.inventory.get("DELUXE") - 1);
+
+        session1State.display();
+        persistence.saveState(session1State);
+        System.out.println("=== SESSION 1 END (Application Shutdown) ===\n");
+
+        // --- SESSION 2: Application Restarts ---
+        System.out.println("=== SESSION 2: RESTART & RECOVERY ===");
+        SystemState session2State = persistence.loadState();
+
+        // Requirement: Ensure restored state accurately reflects the last saved state.
+        session2State.display();
+
+        if (session2State.history.stream().anyMatch(b -> b.guest().equals("Alice"))) {
+            System.out.println("[VERIFIED] Alice's booking survived the restart!");
+        }
+
+        System.out.println("=== SESSION 2 END (Resuming Operations) ===");
     }
 }
