@@ -1,104 +1,84 @@
 import java.util.*;
-import java.util.stream.Collectors;
+import java.util.concurrent.LinkedBlockingQueue;
 
 /**
- * GOAL: Enable guests to view available rooms without modifying system state.
+ * GOAL: Handle multiple booking requests fairly using a FIFO queue mechanism.
  */
 public class Main {
 
-    // --- 1. KEY CONCEPTS: IMMUTABLE DOMAIN MODELS ---
+    // --- 1. DOMAIN MODEL: RESERVATION INTENT ---
 
-    // Room provides descriptive information (Identity/Details)
-    public record Room(String type, String description, double price, List<String> amenities) {}
+    // Represents the guest's intent. Note: No allocation data is present yet.
+    public record Reservation(String guestName, String roomType, int nights) {
+        @Override
+        public String toString() {
+            return String.format("Request[Guest: %s, Room: %s]", guestName, roomType);
+        }
+    }
 
-    // Inventory acts as the State Holder (Availability counts)
-    public record InventoryItem(String roomType, int availableCount) {}
+    // --- 2. FAIRNESS MECHANISM: BOOKING QUEUE ---
 
-    // Data Transfer Object (DTO) for the Guest's view
-    public record AvailableRoomView(String type, String description, double price, List<String> amenities) {}
+    public static class BookingRequestQueue {
+        // LinkedBlockingQueue is thread-safe and preserves arrival order (FIFO)
+        private final Queue<Reservation> queue = new LinkedBlockingQueue<>();
 
-    // --- 2. SEPARATION OF CONCERNS: SERVICE LAYER ---
-
-    public static class RoomSearchService {
-        private final RoomRepository roomRepo;
-        private final InventoryRepository inventoryRepo;
-
-        public RoomSearchService(RoomRepository roomRepo, InventoryRepository inventoryRepo) {
-            this.roomRepo = roomRepo;
-            this.inventoryRepo = inventoryRepo;
+        /**
+         * Requirement: Accept booking requests and store in arrival order.
+         * Concept: FIFO Principle.
+         */
+        public void enqueueRequest(Reservation request) {
+            queue.add(request);
+            System.out.println(">>> System: Received " + request + ". Added to queue.");
         }
 
         /**
-         * Requirement: Retrieve availability and filter only valid options.
-         * Implementation of Read-Only Access and Defensive Programming.
+         * Returns the next request to be processed without removing it,
+         * or null if the queue is empty.
          */
-        public List<AvailableRoomView> searchForGuest() {
-            return inventoryRepo.getLiveInventory().stream()
-                    // Validation Logic: Exclude rooms with zero availability
-                    .filter(item -> item.availableCount() > 0)
-                    // Domain Model Usage: Map state to descriptive details
-                    .map(item -> {
-                        Optional<Room> details = roomRepo.findByType(item.roomType());
-                        return details.map(d -> new AvailableRoomView(
-                                d.type(), d.description(), d.price(), d.amenities()
-                        ));
-                    })
-                    .flatMap(Optional::stream)
-                    // Ensure results are immutable (System state remains unchanged)
-                    .collect(Collectors.toUnmodifiableList());
+        public Reservation peekNext() {
+            return queue.peek();
+        }
+
+        /**
+         * Requirement: Prepare requests for subsequent processing.
+         * This would be called by the Allocation Service later.
+         */
+        public Reservation dequeueNext() {
+            return queue.poll();
+        }
+
+        public int getQueueSize() {
+            return queue.size();
         }
     }
 
-    // --- 3. REPOSITORIES (MOCK DATA ACCESS) ---
-
-    interface RoomRepository {
-        Optional<Room> findByType(String type);
-    }
-
-    interface InventoryRepository {
-        List<InventoryItem> getLiveInventory();
-    }
-
-    // --- 4. EXECUTION (ACTOR: GUEST) ---
+    // --- 3. EXECUTION (ACTORS: MULTIPLE GUESTS) ---
 
     public static void main(String[] args) {
-        // Setup mock data for Room Details
-        RoomRepository roomRepo = type -> switch (type) {
-            case "STANDARD" -> Optional.of(new Room("STANDARD", "Cozy room", 100.0, List.of("WiFi")));
-            case "DELUXE"   -> Optional.of(new Room("DELUXE", "Ocean view", 250.0, List.of("WiFi", "Mini-bar")));
-            case "SUITE"    -> Optional.of(new Room("SUITE", "Luxury penthouse", 500.0, List.of("Jacuzzi", "Butler")));
-            default -> Optional.empty();
-        };
+        BookingRequestQueue intakeQueue = new BookingRequestQueue();
 
-        // Setup mock data for Inventory State
-        InventoryRepository inventoryRepo = () -> List.of(
-                new InventoryItem("STANDARD", 10), // Available
-                new InventoryItem("DELUXE", 2),    // Available
-                new InventoryItem("SUITE", 0)      // UNAVAILABLE - Should be filtered
-        );
+        System.out.println("--- PEAK DEMAND SIMULATION ---");
+        System.out.println("Decoupling intake from allocation. No inventory mutated yet.\n");
 
-        // Initialize Service
-        RoomSearchService searchService = new RoomSearchService(roomRepo, inventoryRepo);
+        // Step 1: Multiple guests submit requests nearly simultaneously
+        intakeQueue.enqueueRequest(new Reservation("Alice", "DELUXE", 3));
+        intakeQueue.enqueueRequest(new Reservation("Bob", "STANDARD", 1));
+        intakeQueue.enqueueRequest(new Reservation("Charlie", "DELUXE", 2));
 
-        // Guest initiates search
-        System.out.println("Guest is searching for available rooms...");
-        System.out.println("--------------------------------------------------");
+        System.out.println("\n--- QUEUE STATUS ---");
+        System.out.println("Total requests waiting: " + intakeQueue.getQueueSize());
 
-        List<AvailableRoomView> results = searchService.searchForGuest();
+        // Step 2: Verify Fairness (First-Come-First-Served)
+        System.out.println("First in line: " + intakeQueue.peekNext().guestName());
 
-        // Display results
-        if (results.isEmpty()) {
-            System.out.println("No rooms currently available.");
-        } else {
-            results.forEach(room -> {
-                System.out.printf("Room: [%s]%n", room.type());
-                System.out.printf("   Description: %s%n", room.description());
-                System.out.printf("   Price:       $%.2f%n", room.price());
-                System.out.printf("   Amenities:   %s%n%n", String.join(", ", room.amenities()));
-            });
+        // Step 3: Demonstrate processing order (Decoupled Allocation)
+        System.out.println("\n--- PROCESSING LOG (FIFO) ---");
+        while (intakeQueue.getQueueSize() > 0) {
+            Reservation next = intakeQueue.dequeueNext();
+            System.out.println("Processing " + next.guestName() + "'s request...");
+            // Allocation logic would happen here in the next stage
         }
 
-        System.out.println("--------------------------------------------------");
-        System.out.println("Search Complete. System state remains unchanged.");
+        System.out.println("\nAll queued requests handled. Fairness preserved.");
     }
 }
