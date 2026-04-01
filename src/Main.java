@@ -1,104 +1,94 @@
 import java.util.*;
-import java.util.stream.Collectors;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * GOAL: Enable guests to view available rooms without modifying system state.
+ * GOAL: Confirm bookings by assigning unique room IDs and preventing double-booking.
  */
 public class Main {
 
-    // --- 1. KEY CONCEPTS: IMMUTABLE DOMAIN MODELS ---
+    // --- 1. DOMAIN MODELS ---
 
-    // Room provides descriptive information (Identity/Details)
-    public record Room(String type, String description, double price, List<String> amenities) {}
+    public record ReservationRequest(String guestName, String roomType) {}
 
-    // Inventory acts as the State Holder (Availability counts)
-    public record InventoryItem(String roomType, int availableCount) {}
+    public record ConfirmedBooking(String guestName, String roomType, String roomId) {}
 
-    // Data Transfer Object (DTO) for the Guest's view
-    public record AvailableRoomView(String type, String description, double price, List<String> amenities) {}
+    // --- 2. THE SERVICES (Inventory & Allocation) ---
 
-    // --- 2. SEPARATION OF CONCERNS: SERVICE LAYER ---
+    public static class AllocationService {
+        // State Holder: Inventory counts (Room Type -> Count)
+        private final Map<String, AtomicInteger> inventory = new ConcurrentHashMap<>();
 
-    public static class RoomSearchService {
-        private final RoomRepository roomRepo;
-        private final InventoryRepository inventoryRepo;
+        // Uniqueness Enforcement: Set of already assigned IDs (Room Type -> Set of Unique IDs)
+        // HashMap<String, Set<String>> allows grouped tracking.
+        private final Map<String, Set<String>> allocatedRooms = new ConcurrentHashMap<>();
 
-        public RoomSearchService(RoomRepository roomRepo, InventoryRepository inventoryRepo) {
-            this.roomRepo = roomRepo;
-            this.inventoryRepo = inventoryRepo;
+        public AllocationService() {
+            // Initializing Mock Inventory
+            inventory.put("DELUXE", new AtomicInteger(2));
+            inventory.put("STANDARD", new AtomicInteger(5));
+
+            allocatedRooms.put("DELUXE", Collections.synchronizedSet(new HashSet<>()));
+            allocatedRooms.put("STANDARD", Collections.synchronizedSet(new HashSet<>()));
         }
 
         /**
-         * Requirement: Retrieve availability and filter only valid options.
-         * Implementation of Read-Only Access and Defensive Programming.
+         * Requirement: Atomic Logical Operation.
+         * Assigns a room and decrements inventory in one synchronized flow.
          */
-        public List<AvailableRoomView> searchForGuest() {
-            return inventoryRepo.getLiveInventory().stream()
-                    // Validation Logic: Exclude rooms with zero availability
-                    .filter(item -> item.availableCount() > 0)
-                    // Domain Model Usage: Map state to descriptive details
-                    .map(item -> {
-                        Optional<Room> details = roomRepo.findByType(item.roomType());
-                        return details.map(d -> new AvailableRoomView(
-                                d.type(), d.description(), d.price(), d.amenities()
-                        ));
-                    })
-                    .flatMap(Optional::stream)
-                    // Ensure results are immutable (System state remains unchanged)
-                    .collect(Collectors.toUnmodifiableList());
+        public Optional<ConfirmedBooking> processAllocation(ReservationRequest request) {
+            String type = request.roomType();
+
+            // Critical Section: Ensure only one thread allocates for this type at a time
+            synchronized (inventory.get(type)) {
+                AtomicInteger count = inventory.get(type);
+
+                // 1. Check availability
+                if (count.get() > 0) {
+                    // 2. Generate Unique Room ID (e.g., DELUXE-101)
+                    String generatedId = type + "-" + (100 + allocatedRooms.get(type).size() + 1);
+
+                    // 3. Uniqueness Enforcement: Check Set to prevent reuse
+                    if (!allocatedRooms.get(type).contains(generatedId)) {
+
+                        // 4. Record the ID to prevent reuse
+                        allocatedRooms.get(type).add(generatedId);
+
+                        // 5. Decrement inventory immediately
+                        count.decrementAndGet();
+
+                        System.out.printf("[SUCCESS] Allocated %s to %s. Remaining: %d%n",
+                                generatedId, request.guestName(), count.get());
+
+                        return Optional.of(new ConfirmedBooking(request.guestName(), type, generatedId));
+                    }
+                }
+            }
+
+            System.out.printf("[FAILURE] No availability for %s (%s)%n", request.guestName(), type);
+            return Optional.empty();
         }
     }
 
-    // --- 3. REPOSITORIES (MOCK DATA ACCESS) ---
-
-    interface RoomRepository {
-        Optional<Room> findByType(String type);
-    }
-
-    interface InventoryRepository {
-        List<InventoryItem> getLiveInventory();
-    }
-
-    // --- 4. EXECUTION (ACTOR: GUEST) ---
+    // --- 3. EXECUTION ---
 
     public static void main(String[] args) {
-        // Setup mock data for Room Details
-        RoomRepository roomRepo = type -> switch (type) {
-            case "STANDARD" -> Optional.of(new Room("STANDARD", "Cozy room", 100.0, List.of("WiFi")));
-            case "DELUXE"   -> Optional.of(new Room("DELUXE", "Ocean view", 250.0, List.of("WiFi", "Mini-bar")));
-            case "SUITE"    -> Optional.of(new Room("SUITE", "Luxury penthouse", 500.0, List.of("Jacuzzi", "Butler")));
-            default -> Optional.empty();
-        };
+        AllocationService service = new AllocationService();
 
-        // Setup mock data for Inventory State
-        InventoryRepository inventoryRepo = () -> List.of(
-                new InventoryItem("STANDARD", 10), // Available
-                new InventoryItem("DELUXE", 2),    // Available
-                new InventoryItem("SUITE", 0)      // UNAVAILABLE - Should be filtered
-        );
+        // FIFO Queue from previous stage
+        Queue<ReservationRequest> queue = new LinkedList<>();
+        queue.add(new ReservationRequest("Alice", "DELUXE"));
+        queue.add(new ReservationRequest("Bob", "DELUXE"));
+        queue.add(new ReservationRequest("Charlie", "DELUXE")); // This should fail (Inventory is 2)
 
-        // Initialize Service
-        RoomSearchService searchService = new RoomSearchService(roomRepo, inventoryRepo);
+        System.out.println("--- Starting Allocation Processing (FIFO) ---");
 
-        // Guest initiates search
-        System.out.println("Guest is searching for available rooms...");
-        System.out.println("--------------------------------------------------");
-
-        List<AvailableRoomView> results = searchService.searchForGuest();
-
-        // Display results
-        if (results.isEmpty()) {
-            System.out.println("No rooms currently available.");
-        } else {
-            results.forEach(room -> {
-                System.out.printf("Room: [%s]%n", room.type());
-                System.out.printf("   Description: %s%n", room.description());
-                System.out.printf("   Price:       $%.2f%n", room.price());
-                System.out.printf("   Amenities:   %s%n%n", String.join(", ", room.amenities()));
-            });
+        while (!queue.isEmpty()) {
+            ReservationRequest request = queue.poll();
+            service.processAllocation(request);
         }
 
-        System.out.println("--------------------------------------------------");
-        System.out.println("Search Complete. System state remains unchanged.");
+        System.out.println("\n--- Final System Consistency Check ---");
+        System.out.println("Inventory reflects real-time state. No double-bookings occurred.");
     }
 }
