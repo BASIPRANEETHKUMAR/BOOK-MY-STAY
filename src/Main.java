@@ -1,64 +1,84 @@
 import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * GOAL: Sort passenger bogies based on seating capacity using a custom Comparator.
+ * GOAL: Ensure system correctness under concurrent multi-user booking requests.
  */
-public class Main {
+public class ConcurrentBookingSystem {
 
-    // --- 1. CUSTOM OBJECT: THE BOGIE CLASS ---
+    // --- 1. DOMAIN MODELS ---
+    public record BookingRequest(String guestName, String roomType) {}
 
-    public static class Bogie {
-        private final String name;
-        private final int capacity;
+    // --- 2. THE CONCURRENT PROCESSOR ---
+    public static class ConcurrentBookingProcessor {
+        // Shared Mutable State: Inventory counts
+        private final Map<String, Integer> inventory = new HashMap<>();
 
-        public Bogie(String name, int capacity) {
-            this.name = name;
-            this.capacity = capacity;
+        // Shared Mutable State: The Request Queue (Thread-safe implementation)
+        private final BlockingQueue<BookingRequest> requestQueue = new LinkedBlockingQueue<>();
+
+        public ConcurrentBookingProcessor() {
+            inventory.put("DELUXE", 2); // Only 2 rooms for many guests!
         }
 
-        public String getName() { return name; }
-        public int getCapacity() { return capacity; }
+        public void submitRequest(BookingRequest request) {
+            requestQueue.add(request);
+        }
 
-        @Override
-        public String toString() {
-            return String.format("Bogie: %-12s | Capacity: %d", name, capacity);
+        /**
+         * Requirement: Critical Sections & Synchronized Access.
+         * Processes a single request from the queue safely.
+         */
+        public void processNextRequest() {
+            BookingRequest request = requestQueue.poll();
+            if (request == null) return;
+
+            // Synchronization ensures only one thread enters this block per room type
+            synchronized (inventory) {
+                int count = inventory.getOrDefault(request.roomType(), 0);
+
+                System.out.printf("[Thread %s] Checking for %s... (Current Stock: %d)%n",
+                        Thread.currentThread().getName(), request.guestName(), count);
+
+                if (count > 0) {
+                    // Simulate processing time to increase chance of race conditions if unsynced
+                    try { Thread.sleep(50); } catch (InterruptedException e) { }
+
+                    inventory.put(request.roomType(), count - 1);
+                    System.out.printf(">> [SUCCESS] %s booked a %s. Remaining: %d%n",
+                            request.guestName(), request.roomType(), inventory.get(request.roomType()));
+                } else {
+                    System.out.printf(">> [FAILED] No rooms left for %s.%n", request.guestName());
+                }
+            }
         }
     }
 
-    // --- 2. EXECUTION FLOW ---
+    // --- 3. THE SIMULATION (ACTORS: MULTIPLE GUESTS) ---
+    public static void main(String[] args) throws InterruptedException {
+        ConcurrentBookingProcessor processor = new ConcurrentBookingProcessor();
 
-    public static void main(String[] args) {
-        // Step 1: Create a List<Bogie> to store passenger bogies
-        List<Bogie> trainBogies = new ArrayList<>();
+        // 5 Guests all trying to book the 2 available Deluxe rooms
+        String[] guests = {"Alice", "Bob", "Charlie", "Dan", "Eve"};
+        for (String name : guests) {
+            processor.submitRequest(new BookingRequest(name, "DELUXE"));
+        }
 
-        // Step 2: Add bogies with varying capacities
-        trainBogies.add(new Bogie("Sleeper", 72));
-        trainBogies.add(new Bogie("AC Chair", 56));
-        trainBogies.add(new Bogie("First Class", 24));
-        trainBogies.add(new Bogie("General", 90));
+        // Creating an ExecutorService to simulate parallel processing
+        // Requirement: Simulate multiple requests occurring at the same time.
+        ExecutorService executor = Executors.newFixedThreadPool(3);
 
-        System.out.println("--- Original Train Order ---");
-        trainBogies.forEach(System.out::println);
+        System.out.println("--- CONCURRENCY TEST START ---");
 
-        // --- 3. KEY CONCEPT: COMPARATOR & SORTING ---
+        for (int i = 0; i < guests.length; i++) {
+            executor.submit(processor::processNextRequest);
+        }
 
-        /**
-         * Requirement: Use Comparator.comparingInt() to define sorting.
-         * Benefit: Separation of Data and Logic. The Bogie class doesn't need
-         * to know how to sort itself; the System defines the rule here.
-         */
-        trainBogies.sort(Comparator.comparingInt(Bogie::getCapacity));
+        executor.shutdown();
+        executor.awaitTermination(5, TimeUnit.SECONDS);
 
-        System.out.println("\n--- Sorted by Capacity (Ascending) ---");
-        // Step 4: Display sorted bogies
-        trainBogies.forEach(System.out::println);
-
-        // Optional: Sorting in Descending order (Highest capacity first)
-        trainBogies.sort(Comparator.comparingInt(Bogie::getCapacity).reversed());
-
-        System.out.println("\n--- Sorted by Capacity (Descending) ---");
-        trainBogies.forEach(System.out::println);
-
-        System.out.println("\nProgram continues... Train planning complete.");
+        System.out.println("--- CONCURRENCY TEST END ---");
+        System.out.println("Final System State (Inventory): " + processor.inventory);
     }
 }
