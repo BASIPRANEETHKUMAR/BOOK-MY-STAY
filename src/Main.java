@@ -1,100 +1,96 @@
 import java.util.*;
-import java.util.stream.Collectors;
 
 /**
- * GOAL: Maintain a chronological audit trail and support administrative reporting.
+ * GOAL: Strengthen reliability via structured validation and custom error handling.
  */
-public class Main
-{
+public class Main {
 
-    // --- 1. DOMAIN MODEL: THE HISTORICAL RECORD ---
+    // --- 1. CUSTOM EXCEPTIONS (Domain-Specific) ---
 
-    // Represents a completed transaction stored for historical tracking.
-    public record ConfirmedReservation(String guestName, String roomType, String roomId, double price) {
-        @Override
-        public String toString() {
-            return String.format("Audit Entry: [Guest: %-8s | Room: %-10s | Revenue: $%.2f]",
-                    guestName, roomId, price);
+    /**
+     * Requirement: Throw and handle custom exceptions for invalid scenarios.
+     * Custom exceptions make the cause of failure explicit.
+     */
+    public static class BookingValidationException extends Exception {
+        public BookingValidationException(String message) {
+            super(message);
         }
     }
 
-    // --- 2. BOOKING HISTORY (STORAGE LAYER) ---
+    // --- 2. THE VALIDATOR (Guarding System State) ---
 
-    public static class BookingHistory {
-        // Requirement: Use a List to maintain records in insertion order (Chronological).
-        private final List<ConfirmedReservation> recordStore = new ArrayList<>();
-
-        /**
-         * Requirement: Store confirmed reservations.
-         * Concept: Historical Tracking / Audit Trail.
-         */
-        public void archive(ConfirmedReservation reservation) {
-            recordStore.add(reservation);
-        }
+    public static class BookingValidator {
+        private final Set<String> validRoomTypes = Set.of("DELUXE", "STANDARD", "SUITE");
 
         /**
-         * Requirement: Allow retrieval for review.
-         * Returns an unmodifiable view to ensure reporting does not modify data.
+         * Requirement: Validate input values and system constraints.
+         * Concept: Fail-Fast Design - check everything before touching the data.
          */
-        public List<ConfirmedReservation> getHistoryView() {
-            return Collections.unmodifiableList(recordStore);
+        public void validate(String roomType, int currentInventory) throws BookingValidationException {
+            // 1. Validate Input: Room Type existence
+            if (!validRoomTypes.contains(roomType.toUpperCase())) {
+                throw new BookingValidationException("Invalid Room Type: " + roomType);
+            }
+
+            // 2. Guarding System State: Prevent negative inventory
+            if (currentInventory <= 0) {
+                throw new BookingValidationException("Insufficient Inventory: " + roomType + " is sold out.");
+            }
         }
     }
 
-    // --- 3. BOOKING REPORT SERVICE (ANALYSIS LAYER) ---
+    // --- 3. THE BOOKING SERVICE (Correctness over Happy Path) ---
 
-    public static class BookingReportService {
-        private final BookingHistory history;
+    public static class BookingService {
+        private final Map<String, Integer> inventory = new HashMap<>();
+        private final BookingValidator validator = new BookingValidator();
 
-        public BookingReportService(BookingHistory history) {
-            this.history = history;
+        public BookingService() {
+            inventory.put("DELUXE", 1); // Only one left!
+            inventory.put("STANDARD", 10);
         }
 
-        /**
-         * Requirement: Generate summary reports from booking history.
-         * Concept: Reporting Readiness.
-         */
-        public void runManagerialReport() {
-            List<ConfirmedReservation> data = history.getHistoryView();
+        public void processBooking(String guestName, String roomType) {
+            System.out.println(">>> Processing request for " + guestName + " (" + roomType + ")...");
 
-            double totalRevenue = data.stream().mapToDouble(ConfirmedReservation::price).sum();
-            long totalCount = data.size();
+            try {
+                int currentStock = inventory.getOrDefault(roomType.toUpperCase(), 0);
 
-            System.out.println("\n--- ADMINISTRATIVE OPERATIONAL REPORT ---");
-            System.out.println("Total Bookings Processed: " + totalCount);
-            System.out.printf("Total Gross Revenue:      $%.2f%n", totalRevenue);
-            System.out.println("-----------------------------------------");
+                // Step 1: Validate (This will throw an exception if rules are broken)
+                validator.validate(roomType, currentStock);
 
-            // Categorical Breakdown
-            Map<String, Long> summary = data.stream()
-                    .collect(Collectors.groupingBy(ConfirmedReservation::roomType, Collectors.counting()));
+                // Step 2: If we reach here, validation passed. Update State safely.
+                inventory.put(roomType.toUpperCase(), currentStock - 1);
+                System.out.println("[SUCCESS] Booking confirmed for " + guestName);
 
-            summary.forEach((type, count) ->
-                    System.out.printf("Category: %-10s | Volume: %d%n", type, count));
-            System.out.println("-----------------------------------------\n");
+            } catch (BookingValidationException e) {
+                // Requirement: Graceful Failure Handling.
+                // Display clear message without crashing the app.
+                System.err.println("[VALIDATION ERROR] " + e.getMessage());
+            } catch (Exception e) {
+                System.err.println("[SYSTEM ERROR] An unexpected error occurred.");
+            } finally {
+                // Requirement: Ensure the system remains stable.
+                System.out.println("System Status: Operational. Ready for next request.\n");
+            }
         }
     }
 
-    // --- 4. EXECUTION FLOW (ACTOR: ADMIN) ---
+    // --- 4. EXECUTION (ACTOR: GUEST) ---
 
     public static void main(String[] args) {
-        // Initialize the Persistence-oriented infrastructure
-        BookingHistory history = new BookingHistory();
-        BookingReportService reportService = new BookingReportService(history);
+        BookingService service = new BookingService();
 
-        // Simulation: Bookings are confirmed and archived
-        System.out.println("System: Archiving confirmed reservations...");
-        history.archive(new ConfirmedReservation("Alice", "DELUXE", "D-101", 300.0));
-        history.archive(new ConfirmedReservation("Bob", "STANDARD", "S-205", 150.0));
-        history.archive(new ConfirmedReservation("Charlie", "DELUXE", "D-102", 300.0));
+        // Scenario A: Valid Booking
+        service.processBooking("Alice", "DELUXE");
 
-        // Requirement: Admin reviews booking history
-        System.out.println("\n--- Admin: Accessing Historical Audit Trail ---");
-        history.getHistoryView().forEach(System.out::println);
+        // Scenario B: Invalid Input (Non-existent room type)
+        service.processBooking("Bob", "PENTHOUSE");
 
-        // Requirement: Generate summaries
-        reportService.runManagerialReport();
+        // Scenario C: State Constraint (Booking a room that just ran out)
+        service.processBooking("Charlie", "DELUXE");
 
-        System.out.println("Persistence Mindset Check: Audit trail is secured and ordered.");
+        // Scenario D: Valid Booking after failures
+        service.processBooking("Dan", "STANDARD");
     }
 }
