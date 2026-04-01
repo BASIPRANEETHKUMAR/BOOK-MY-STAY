@@ -1,79 +1,84 @@
 import java.util.*;
+import java.util.concurrent.*;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * GOAL: Enable safe cancellation and LIFO rollback of confirmed bookings.
+ * GOAL: Ensure system correctness under concurrent multi-user booking requests.
  */
-public class CancellationSystem {
+public class ConcurrentBookingSystem {
 
     // --- 1. DOMAIN MODELS ---
+    public record BookingRequest(String guestName, String roomType) {}
 
-    public record Reservation(String guestId, String roomType, String roomId) {}
-
-    // --- 2. CANCELLATION SERVICE (REVERSAL LOGIC) ---
-
-    public static class BookingCancellationService {
+    // --- 2. THE CONCURRENT PROCESSOR ---
+    public static class ConcurrentBookingProcessor {
+        // Shared Mutable State: Inventory counts
         private final Map<String, Integer> inventory = new HashMap<>();
-        private final Map<String, Reservation> activeReservations = new HashMap<>();
 
-        // Requirement: Stack Data Structure for LIFO Rollback Logic
-        // Tracks released room IDs to be reused in future allocations.
-        private final Stack<String> releasedRoomPool = new Stack<>();
+        // Shared Mutable State: The Request Queue (Thread-safe implementation)
+        private final BlockingQueue<BookingRequest> requestQueue = new LinkedBlockingQueue<>();
 
-        public BookingCancellationService() {
-            // Initial State
-            inventory.put("DELUXE", 0); // Currently sold out
-            activeReservations.put("GUEST_101", new Reservation("GUEST_101", "DELUXE", "D-105"));
+        public ConcurrentBookingProcessor() {
+            inventory.put("DELUXE", 2); // Only 2 rooms for many guests!
+        }
+
+        public void submitRequest(BookingRequest request) {
+            requestQueue.add(request);
         }
 
         /**
-         * Requirement: Validate existence and perform controlled rollback.
+         * Requirement: Critical Sections & Synchronized Access.
+         * Processes a single request from the queue safely.
          */
-        public void cancelBooking(String guestId) {
-            System.out.println(">>> Initiating cancellation for Guest: " + guestId);
+        public void processNextRequest() {
+            BookingRequest request = requestQueue.poll();
+            if (request == null) return;
 
-            // 1. Validation: Ensure the reservation exists before performing rollback
-            if (!activeReservations.containsKey(guestId)) {
-                System.err.println("[ERROR] Cancellation Failed: No active reservation found for " + guestId);
-                return;
+            // Synchronization ensures only one thread enters this block per room type
+            synchronized (inventory) {
+                int count = inventory.getOrDefault(request.roomType(), 0);
+
+                System.out.printf("[Thread %s] Checking for %s... (Current Stock: %d)%n",
+                        Thread.currentThread().getName(), request.guestName(), count);
+
+                if (count > 0) {
+                    // Simulate processing time to increase chance of race conditions if unsynced
+                    try { Thread.sleep(50); } catch (InterruptedException e) { }
+
+                    inventory.put(request.roomType(), count - 1);
+                    System.out.printf(">> [SUCCESS] %s booked a %s. Remaining: %d%n",
+                            request.guestName(), request.roomType(), inventory.get(request.roomType()));
+                } else {
+                    System.out.printf(">> [FAILED] No rooms left for %s.%n", request.guestName());
+                }
             }
-
-            // 2. State Reversal: Retrieve the booking details
-            Reservation reservation = activeReservations.remove(guestId);
-            String roomType = reservation.roomType();
-            String roomId = reservation.roomId();
-
-            // 3. LIFO Rollback: Push the room ID onto the stack for immediate reuse
-            releasedRoomPool.push(roomId);
-
-            // 4. Inventory Restoration: Increment count immediately
-            int currentStock = inventory.getOrDefault(roomType, 0);
-            inventory.put(roomType, currentStock + 1);
-
-            System.out.printf("[SUCCESS] Cancellation Complete. Room %s is back in pool.%n", roomId);
-            System.out.printf("Current %s Inventory: %d%n", roomType, inventory.get(roomType));
-            System.out.println("--------------------------------------------------");
-        }
-
-        public void showSystemStatus() {
-            System.out.println("Released Rooms (Available for Re-allocation): " + releasedRoomPool);
         }
     }
 
-    // --- 3. EXECUTION FLOW ---
+    // --- 3. THE SIMULATION (ACTORS: MULTIPLE GUESTS) ---
+    public static void main(String[] args) throws InterruptedException {
+        ConcurrentBookingProcessor processor = new ConcurrentBookingProcessor();
 
-    public static void main(String[] args) {
-        BookingCancellationService service = new BookingCancellationService();
+        // 5 Guests all trying to book the 2 available Deluxe rooms
+        String[] guests = {"Alice", "Bob", "Charlie", "Dan", "Eve"};
+        for (String name : guests) {
+            processor.submitRequest(new BookingRequest(name, "DELUXE"));
+        }
 
-        // Scenario 1: Successful Cancellation
-        service.cancelBooking("GUEST_101");
+        // Creating an ExecutorService to simulate parallel processing
+        // Requirement: Simulate multiple requests occurring at the same time.
+        ExecutorService executor = Executors.newFixedThreadPool(3);
 
-        // Scenario 2: Attempting to cancel a non-existent booking
-        // Requirement: Prevent cancellation of non-existent or already cancelled bookings.
-        service.cancelBooking("GUEST_999");
+        System.out.println("--- CONCURRENCY TEST START ---");
 
-        // Scenario 3: Attempting to double-cancel
-        service.cancelBooking("GUEST_101");
+        for (int i = 0; i < guests.length; i++) {
+            executor.submit(processor::processNextRequest);
+        }
 
-        service.showSystemStatus();
+        executor.shutdown();
+        executor.awaitTermination(5, TimeUnit.SECONDS);
+
+        System.out.println("--- CONCURRENCY TEST END ---");
+        System.out.println("Final System State (Inventory): " + processor.inventory);
     }
 }
