@@ -1,94 +1,88 @@
 import java.util.*;
-import java.util.concurrent.*;
-import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * GOAL: Confirm bookings by assigning unique room IDs and preventing double-booking.
+ * GOAL: Confirm booking requests safely using Unique Sets and Atomic operations.
  */
 public class Main {
 
     // --- 1. DOMAIN MODELS ---
 
-    public record ReservationRequest(String guestName, String roomType) {}
+    public record BookingRequest(String guestName, String roomType) {}
 
-    public record ConfirmedBooking(String guestName, String roomType, String roomId) {}
+    public record Confirmation(String guestName, String roomType, String roomId) {}
 
-    // --- 2. THE SERVICES (Inventory & Allocation) ---
+    // --- 2. CORE SERVICES ---
 
-    public static class AllocationService {
-        // State Holder: Inventory counts (Room Type -> Count)
-        private final Map<String, AtomicInteger> inventory = new ConcurrentHashMap<>();
+    public static class BookingService {
+        // Inventory Service (State Holder)
+        private final Map<String, Integer> inventory = new HashMap<>();
 
-        // Uniqueness Enforcement: Set of already assigned IDs (Room Type -> Set of Unique IDs)
-        // HashMap<String, Set<String>> allows grouped tracking.
-        private final Map<String, Set<String>> allocatedRooms = new ConcurrentHashMap<>();
+        // Uniqueness Enforcement: Mapping Room Types to Sets of Assigned IDs
+        private final Map<String, Set<String>> allocatedRoomIds = new HashMap<>();
 
-        public AllocationService() {
-            // Initializing Mock Inventory
-            inventory.put("DELUXE", new AtomicInteger(2));
-            inventory.put("STANDARD", new AtomicInteger(5));
+        public BookingService() {
+            // Initializing system state
+            inventory.put("DELUXE", 2);
+            inventory.put("STANDARD", 5);
 
-            allocatedRooms.put("DELUXE", Collections.synchronizedSet(new HashSet<>()));
-            allocatedRooms.put("STANDARD", Collections.synchronizedSet(new HashSet<>()));
+            allocatedRoomIds.put("DELUXE", new HashSet<>());
+            allocatedRoomIds.put("STANDARD", new HashSet<>());
         }
 
         /**
-         * Requirement: Atomic Logical Operation.
-         * Assigns a room and decrements inventory in one synchronized flow.
+         * Requirement: Process allocation and update inventory immediately.
+         * This method is synchronized to prevent the "Double Booking" problem.
          */
-        public Optional<ConfirmedBooking> processAllocation(ReservationRequest request) {
+        public synchronized Optional<Confirmation> processAllocation(BookingRequest request) {
             String type = request.roomType();
+            int currentCount = inventory.getOrDefault(type, 0);
 
-            // Critical Section: Ensure only one thread allocates for this type at a time
-            synchronized (inventory.get(type)) {
-                AtomicInteger count = inventory.get(type);
+            // 1. Check availability
+            if (currentCount > 0) {
+                // 2. Generate a unique room ID
+                // In a real system, this might be a physical room number (e.g., 101, 102)
+                String generatedId = type + "-" + (allocatedRoomIds.get(type).size() + 1);
 
-                // 1. Check availability
-                if (count.get() > 0) {
-                    // 2. Generate Unique Room ID (e.g., DELUXE-101)
-                    String generatedId = type + "-" + (100 + allocatedRooms.get(type).size() + 1);
+                // 3. Uniqueness Enforcement (Check Set to prevent reuse)
+                if (!allocatedRoomIds.get(type).contains(generatedId)) {
 
-                    // 3. Uniqueness Enforcement: Check Set to prevent reuse
-                    if (!allocatedRooms.get(type).contains(generatedId)) {
+                    // 4. Record the ID and decrement inventory immediately (Atomic operation)
+                    allocatedRoomIds.get(type).add(generatedId);
+                    inventory.put(type, currentCount - 1);
 
-                        // 4. Record the ID to prevent reuse
-                        allocatedRooms.get(type).add(generatedId);
+                    System.out.printf("[SUCCESS] Confirmed: %s assigned Room %s. Remaining %s: %d%n",
+                            request.guestName(), generatedId, type, inventory.get(type));
 
-                        // 5. Decrement inventory immediately
-                        count.decrementAndGet();
-
-                        System.out.printf("[SUCCESS] Allocated %s to %s. Remaining: %d%n",
-                                generatedId, request.guestName(), count.get());
-
-                        return Optional.of(new ConfirmedBooking(request.guestName(), type, generatedId));
-                    }
+                    return Optional.of(new Confirmation(request.guestName(), type, generatedId));
                 }
             }
 
-            System.out.printf("[FAILURE] No availability for %s (%s)%n", request.guestName(), type);
+            System.out.printf("[DENIED] Could not book %s for %s. Out of stock.%n", type, request.guestName());
             return Optional.empty();
         }
     }
 
-    // --- 3. EXECUTION ---
+    // --- 3. EXECUTION FLOW ---
 
     public static void main(String[] args) {
-        AllocationService service = new AllocationService();
+        BookingService bookingService = new BookingService();
 
-        // FIFO Queue from previous stage
-        Queue<ReservationRequest> queue = new LinkedList<>();
-        queue.add(new ReservationRequest("Alice", "DELUXE"));
-        queue.add(new ReservationRequest("Bob", "DELUXE"));
-        queue.add(new ReservationRequest("Charlie", "DELUXE")); // This should fail (Inventory is 2)
+        // FIFO Queue: Stores requests in arrival order
+        Queue<BookingRequest> requestQueue = new LinkedList<>();
+        requestQueue.add(new BookingRequest("Alice", "DELUXE"));
+        requestQueue.add(new BookingRequest("Bob", "DELUXE"));
+        requestQueue.add(new BookingRequest("Charlie", "DELUXE")); // Should fail (only 2 rooms)
+        requestQueue.add(new BookingRequest("Dan", "STANDARD"));
 
-        System.out.println("--- Starting Allocation Processing (FIFO) ---");
+        System.out.println("--- Processing Dequeued Requests ---");
 
-        while (!queue.isEmpty()) {
-            ReservationRequest request = queue.poll();
-            service.processAllocation(request);
+        // Requirement: Retrieve booking requests from the queue in FIFO order
+        while (!requestQueue.isEmpty()) {
+            BookingRequest currentRequest = requestQueue.poll();
+            bookingService.processAllocation(currentRequest);
         }
 
-        System.out.println("\n--- Final System Consistency Check ---");
-        System.out.println("Inventory reflects real-time state. No double-bookings occurred.");
+        System.out.println("\n--- Final Allocation Report ---");
+        System.out.println("No room IDs were reused, and inventory is synchronized.");
     }
 }
