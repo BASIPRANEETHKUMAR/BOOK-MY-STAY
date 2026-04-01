@@ -1,64 +1,100 @@
 import java.util.*;
+import java.util.stream.Collectors;
 
 /**
- * GOAL: Sort passenger bogies based on seating capacity using a custom Comparator.
+ * GOAL: Maintain a chronological audit trail and support administrative reporting.
  */
-public class Main {
+public class Main
+{
 
-    // --- 1. CUSTOM OBJECT: THE BOGIE CLASS ---
+    // --- 1. DOMAIN MODEL: THE HISTORICAL RECORD ---
 
-    public static class Bogie {
-        private final String name;
-        private final int capacity;
-
-        public Bogie(String name, int capacity) {
-            this.name = name;
-            this.capacity = capacity;
-        }
-
-        public String getName() { return name; }
-        public int getCapacity() { return capacity; }
-
+    // Represents a completed transaction stored for historical tracking.
+    public record ConfirmedReservation(String guestName, String roomType, String roomId, double price) {
         @Override
         public String toString() {
-            return String.format("Bogie: %-12s | Capacity: %d", name, capacity);
+            return String.format("Audit Entry: [Guest: %-8s | Room: %-10s | Revenue: $%.2f]",
+                    guestName, roomId, price);
         }
     }
 
-    // --- 2. EXECUTION FLOW ---
+    // --- 2. BOOKING HISTORY (STORAGE LAYER) ---
 
-    public static void main(String[] args) {
-        // Step 1: Create a List<Bogie> to store passenger bogies
-        List<Bogie> trainBogies = new ArrayList<>();
-
-        // Step 2: Add bogies with varying capacities
-        trainBogies.add(new Bogie("Sleeper", 72));
-        trainBogies.add(new Bogie("AC Chair", 56));
-        trainBogies.add(new Bogie("First Class", 24));
-        trainBogies.add(new Bogie("General", 90));
-
-        System.out.println("--- Original Train Order ---");
-        trainBogies.forEach(System.out::println);
-
-        // --- 3. KEY CONCEPT: COMPARATOR & SORTING ---
+    public static class BookingHistory {
+        // Requirement: Use a List to maintain records in insertion order (Chronological).
+        private final List<ConfirmedReservation> recordStore = new ArrayList<>();
 
         /**
-         * Requirement: Use Comparator.comparingInt() to define sorting.
-         * Benefit: Separation of Data and Logic. The Bogie class doesn't need
-         * to know how to sort itself; the System defines the rule here.
+         * Requirement: Store confirmed reservations.
+         * Concept: Historical Tracking / Audit Trail.
          */
-        trainBogies.sort(Comparator.comparingInt(Bogie::getCapacity));
+        public void archive(ConfirmedReservation reservation) {
+            recordStore.add(reservation);
+        }
 
-        System.out.println("\n--- Sorted by Capacity (Ascending) ---");
-        // Step 4: Display sorted bogies
-        trainBogies.forEach(System.out::println);
+        /**
+         * Requirement: Allow retrieval for review.
+         * Returns an unmodifiable view to ensure reporting does not modify data.
+         */
+        public List<ConfirmedReservation> getHistoryView() {
+            return Collections.unmodifiableList(recordStore);
+        }
+    }
 
-        // Optional: Sorting in Descending order (Highest capacity first)
-        trainBogies.sort(Comparator.comparingInt(Bogie::getCapacity).reversed());
+    // --- 3. BOOKING REPORT SERVICE (ANALYSIS LAYER) ---
 
-        System.out.println("\n--- Sorted by Capacity (Descending) ---");
-        trainBogies.forEach(System.out::println);
+    public static class BookingReportService {
+        private final BookingHistory history;
 
-        System.out.println("\nProgram continues... Train planning complete.");
+        public BookingReportService(BookingHistory history) {
+            this.history = history;
+        }
+
+        /**
+         * Requirement: Generate summary reports from booking history.
+         * Concept: Reporting Readiness.
+         */
+        public void runManagerialReport() {
+            List<ConfirmedReservation> data = history.getHistoryView();
+
+            double totalRevenue = data.stream().mapToDouble(ConfirmedReservation::price).sum();
+            long totalCount = data.size();
+
+            System.out.println("\n--- ADMINISTRATIVE OPERATIONAL REPORT ---");
+            System.out.println("Total Bookings Processed: " + totalCount);
+            System.out.printf("Total Gross Revenue:      $%.2f%n", totalRevenue);
+            System.out.println("-----------------------------------------");
+
+            // Categorical Breakdown
+            Map<String, Long> summary = data.stream()
+                    .collect(Collectors.groupingBy(ConfirmedReservation::roomType, Collectors.counting()));
+
+            summary.forEach((type, count) ->
+                    System.out.printf("Category: %-10s | Volume: %d%n", type, count));
+            System.out.println("-----------------------------------------\n");
+        }
+    }
+
+    // --- 4. EXECUTION FLOW (ACTOR: ADMIN) ---
+
+    public static void main(String[] args) {
+        // Initialize the Persistence-oriented infrastructure
+        BookingHistory history = new BookingHistory();
+        BookingReportService reportService = new BookingReportService(history);
+
+        // Simulation: Bookings are confirmed and archived
+        System.out.println("System: Archiving confirmed reservations...");
+        history.archive(new ConfirmedReservation("Alice", "DELUXE", "D-101", 300.0));
+        history.archive(new ConfirmedReservation("Bob", "STANDARD", "S-205", 150.0));
+        history.archive(new ConfirmedReservation("Charlie", "DELUXE", "D-102", 300.0));
+
+        // Requirement: Admin reviews booking history
+        System.out.println("\n--- Admin: Accessing Historical Audit Trail ---");
+        history.getHistoryView().forEach(System.out::println);
+
+        // Requirement: Generate summaries
+        reportService.runManagerialReport();
+
+        System.out.println("Persistence Mindset Check: Audit trail is secured and ordered.");
     }
 }
